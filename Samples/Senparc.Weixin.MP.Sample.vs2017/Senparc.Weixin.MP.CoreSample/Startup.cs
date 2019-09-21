@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Builder;
+﻿using System;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -10,7 +11,6 @@ using Senparc.CO2NET.Cache;
 using Senparc.Weixin.RegisterServices;
 using Senparc.CO2NET.RegisterServices;
 using Senparc.Weixin.Entities;
-using Senparc.Weixin.MP.Sample.CommonService.Utilities;
 using Senparc.CO2NET.Cache.Memcached;//DPBMARK Memcached DPBMARK_END
 using Senparc.Weixin.Cache.Memcached;//DPBMARK Memcached DPBMARK_END
 using Senparc.CO2NET.Cache.Redis;//DPBMARK Redis DPBMARK_END
@@ -20,6 +20,11 @@ using Senparc.Weixin.Open.ComponentAPIs;//DPBMARK Open DPBMARK_END
 using Senparc.Weixin.TenPay;//DPBMARK TenPay DPBMARK_END
 using Senparc.Weixin.Work;//DPBMARK Work DPBMARK_END
 using Senparc.Weixin.WxOpen;//DPBMARK MiniProgram DPBMARK_END
+using Senparc.WebSocket;
+
+using Senparc.CO2NET.Utilities;
+using Senparc.Weixin.MP.CoreSample.WebSocket.Hubs;
+using Senparc.Weixin.MP.Sample.CommonService.MessageHandlers.WebSocket;
 
 namespace Senparc.Weixin.MP.CoreSample
 {
@@ -37,9 +42,12 @@ namespace Senparc.Weixin.MP.CoreSample
         {
             services.AddMvc();
 
+            //services.AddHttpContextAccessor();
             services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
             services.AddMemoryCache();//使用本地缓存必须添加
             services.AddSession();//使用Session
+
+            services.AddSignalR();//使用 SignalR
 
             /*
              * CO2NET 是从 Senparc.Weixin 分离的底层公共基础模块，经过了长达 6 年的迭代优化，稳定可靠。
@@ -48,7 +56,8 @@ namespace Senparc.Weixin.MP.CoreSample
              */
 
             services.AddSenparcGlobalServices(Configuration)//Senparc.CO2NET 全局注册
-                    .AddSenparcWeixinServices(Configuration);//Senparc.Weixin 注册
+                    .AddSenparcWeixinServices(Configuration)//Senparc.Weixin 注册
+                    .AddSenparcWebSocket<CustomNetCoreWebSocketMessageHandler>();//Senparc.WebSocket 注册（按需）
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -77,14 +86,11 @@ namespace Senparc.Weixin.MP.CoreSample
                     template: "{controller=Home}/{action=Index}/{id?}");
             });
 
-
-            #region 提供网站根目录（当前 Sample 用到，和 SDK 无关）
-            if (env.ContentRootPath != null)
+            //使用 SignalR
+            app.UseSignalR(routes =>
             {
-                Senparc.Weixin.MP.Sample.CommonService.Utilities.Server.AppDomainAppPath = env.ContentRootPath;// env.ContentRootPath;
-            }
-            Senparc.Weixin.MP.Sample.CommonService.Utilities.Server.WebRootPath = env.WebRootPath;// env.ContentRootPath;
-            #endregion
+                routes.MapHub<SenparcHub>("/senparcHub");
+            });
 
             // 启动 CO2NET 全局注册，必须！
             IRegisterService register = RegisterService.Start(env, senparcSetting.Value)
@@ -107,7 +113,7 @@ namespace Senparc.Weixin.MP.CoreSample
 
             //配置全局使用Redis缓存（按需，独立）
             var redisConfigurationStr = senparcSetting.Value.Cache_Redis_Configuration;
-            var useRedis = !string.IsNullOrEmpty(redisConfigurationStr) && redisConfigurationStr != "Redis配置";
+            var useRedis = !string.IsNullOrEmpty(redisConfigurationStr) && redisConfigurationStr != "#{Cache_Redis_Configuration}#"/*默认值，不启用*/;
             if (useRedis)//这里为了方便不同环境的开发者进行配置，做成了判断的方式，实际开发环境一般是确定的，这里的if条件可以忽略
             {
                 /* 说明：
@@ -132,7 +138,7 @@ namespace Senparc.Weixin.MP.CoreSample
 
             //配置Memcached缓存（按需，独立）
             var memcachedConfigurationStr = senparcSetting.Value.Cache_Memcached_Configuration;
-            var useMemcached = !string.IsNullOrEmpty(memcachedConfigurationStr) && memcachedConfigurationStr != "Memcached配置";
+            var useMemcached = !string.IsNullOrEmpty(memcachedConfigurationStr) && memcachedConfigurationStr != "#{Cache_Memcached_Configuration}#";
 
             if (useMemcached) //这里为了方便不同环境的开发者进行配置，做成了判断的方式，实际开发环境一般是确定的，这里的if条件可以忽略
             {
@@ -160,6 +166,8 @@ namespace Senparc.Weixin.MP.CoreSample
             register.RegisterTraceLog(ConfigTraceLog);//配置TraceLog
 
             #endregion
+
+            CO2NET.APM.Config.DataExpire = TimeSpan.FromMinutes(60);//测试APM缓存过期时间（默认情况下可以不用设置）
 
             #endregion
 
@@ -232,10 +240,10 @@ namespace Senparc.Weixin.MP.CoreSample
 
                 //注册第三方平台（可注册多个）
                 .RegisterOpenComponent(senparcWeixinSetting.Value,
-                    //getComponentVerifyTicketFunc
-                    componentAppId =>
+                   //getComponentVerifyTicketFunc
+                   async componentAppId =>
                     {
-                        var dir = Path.Combine(Server.GetMapPath("~/App_Data/OpenTicket"));
+                        var dir = Path.Combine(ServerUtility.ContentRootMapPath("~/App_Data/OpenTicket"));
                         if (!Directory.Exists(dir))
                         {
                             Directory.CreateDirectory(dir);
@@ -246,16 +254,16 @@ namespace Senparc.Weixin.MP.CoreSample
                         {
                             using (var sr = new StreamReader(fs))
                             {
-                                var ticket = sr.ReadToEnd();
+                                var ticket = await sr.ReadToEndAsync();
                                 return ticket;
                             }
                         }
                     },
 
-                     //getAuthorizerRefreshTokenFunc
-                     (componentAppId, auhtorizerId) =>
+                  //getAuthorizerRefreshTokenFunc
+                  async (componentAppId, auhtorizerId) =>
                      {
-                         var dir = Path.Combine(Server.GetMapPath("~/App_Data/AuthorizerInfo/" + componentAppId));
+                         var dir = Path.Combine(ServerUtility.ContentRootMapPath("~/App_Data/AuthorizerInfo/" + componentAppId));
                          if (!Directory.Exists(dir))
                          {
                              Directory.CreateDirectory(dir);
@@ -278,7 +286,7 @@ namespace Senparc.Weixin.MP.CoreSample
                      //authorizerTokenRefreshedFunc
                      (componentAppId, auhtorizerId, refreshResult) =>
                      {
-                         var dir = Path.Combine(Server.GetMapPath("~/App_Data/AuthorizerInfo/" + componentAppId));
+                         var dir = Path.Combine(ServerUtility.ContentRootMapPath("~/App_Data/AuthorizerInfo/" + componentAppId));
                          if (!Directory.Exists(dir))
                          {
                              Directory.CreateDirectory(dir);

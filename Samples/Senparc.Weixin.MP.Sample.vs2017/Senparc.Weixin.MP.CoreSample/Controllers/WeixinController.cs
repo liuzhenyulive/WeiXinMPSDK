@@ -1,5 +1,5 @@
 ﻿/*----------------------------------------------------------------
-    Copyright (C) 2018 Senparc
+    Copyright (C) 2019 Senparc
 
     文件名：WeixinController.cs
     文件功能描述：用于处理微信回调的信息
@@ -17,13 +17,19 @@ using Senparc.Weixin.MP.Entities.Request;
 
 namespace Senparc.Weixin.MP.CoreSample.Controllers
 {
+    using Microsoft.AspNetCore.Http;
     using Microsoft.Extensions.Options;
+    using Senparc.CO2NET.Cache;
     using Senparc.CO2NET.HttpUtility;
+    using Senparc.CO2NET.Utilities;
     using Senparc.Weixin.Entities;
     using Senparc.Weixin.HttpUtility;
     using Senparc.Weixin.MP.MvcExtension;
     using Senparc.Weixin.MP.Sample.CommonService.CustomMessageHandler;
     using Senparc.Weixin.MP.Sample.CommonService.Utilities;
+    using System.Text;
+    using System.Threading;
+    using System.Threading.Tasks;
 
     public partial class WeixinController : Controller
     {
@@ -31,7 +37,7 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
         public static readonly string EncodingAESKey = Config.SenparcWeixinSetting.EncodingAESKey;//与微信公众账号后台的EncodingAESKey设置保持一致，区分大小写。
         public static readonly string AppId = Config.SenparcWeixinSetting.WeixinAppId;//与微信公众账号后台的AppId设置保持一致，区分大小写。
 
-        readonly Func<string> _getRandomFileName = () => DateTime.Now.ToString("yyyyMMdd-HHmmss") + Guid.NewGuid().ToString("n").Substring(0, 6);
+        readonly Func<string> _getRandomFileName = () => SystemTime.Now.ToString("yyyyMMdd-HHmmss") + Guid.NewGuid().ToString("n").Substring(0, 6);
 
         SenparcWeixinSetting _senparcWeixinSetting;
 
@@ -59,13 +65,13 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
         }
 
         /// <summary>
-        /// 用户发送消息后，微信平台自动Post一个请求到这里，并等待响应XML。
+        /// 【异步方法】用户发送消息后，微信平台自动Post一个请求到这里，并等待响应XML。
         /// PS：此方法为简化方法，效果与OldPost一致。
         /// v0.8之后的版本可以结合Senparc.Weixin.MP.MvcExtension扩展包，使用WeixinResult，见MiniPost方法。
         /// </summary>
         [HttpPost]
         [ActionName("Index")]
-        public ActionResult Post(PostModel postModel)
+        public async Task<ActionResult> Post(PostModel postModel)
         {
             if (!CheckSignature.Check(postModel.Signature, postModel.Timestamp, postModel.Nonce, Token))
             {
@@ -80,7 +86,8 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
 
             #endregion
 
-            //v4.2.2之后的版本，可以设置每个人上下文消息储存的最大数量，防止内存占用过多，如果该参数小于等于0，则不限制
+            //v4.2.2之后的版本，可以设置每个人上下文消息储存的最大数量，防止内存占用过多，如果该参数小于等于0，则不限制（实际最大限制 99999）
+            //注意：如果使用分布式缓存，不建议此值设置过大，如果需要储存历史信息，请使用数据库储存
             var maxRecordCount = 10;
 
             //自定义MessageHandler，对微信请求的详细判断操作都在这里面。
@@ -97,9 +104,10 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
             try
             {
                 messageHandler.SaveRequestMessageLog();//记录 Request 日志（可选）
-                
-                messageHandler.Execute();//执行微信处理过程（关键）
 
+                CancellationToken cancellationToken = new CancellationToken();
+                await messageHandler.ExecuteAsync(cancellationToken);//执行微信处理过程（关键）
+                
                 messageHandler.SaveResponseMessageLog();//记录 Response 日志（可选）
 
                 //return Content(messageHandler.ResponseDocument.ToString());//v0.7-
@@ -111,7 +119,7 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
                 #region 异常处理
                 WeixinTrace.Log("MessageHandler错误：{0}", ex.Message);
 
-                using (TextWriter tw = new StreamWriter(Server.GetMapPath("~/App_Data/Error_" + _getRandomFileName() + ".txt")))
+                using (TextWriter tw = new StreamWriter(ServerUtility.ContentRootMapPath("~/App_Data/Error_" + _getRandomFileName() + ".txt")))
                 {
                     tw.WriteLine("ExecptionMessage:" + ex.Message);
                     tw.WriteLine(ex.Source);
@@ -181,12 +189,12 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
         public ActionResult ForTest()
         {
             //异步并发测试（提供给单元测试使用）
-            DateTime begin = DateTime.Now;
+            var begin = SystemTime.Now;
             int t1, t2, t3;
             System.Threading.ThreadPool.GetAvailableThreads(out t1, out t3);
             System.Threading.ThreadPool.GetMaxThreads(out t2, out t3);
             System.Threading.Thread.Sleep(TimeSpan.FromSeconds(0.5));
-            DateTime end = DateTime.Now;
+            var end = SystemTime.Now;
             var thread = System.Threading.Thread.CurrentThread;
             var result = string.Format("TId:{0}\tApp:{1}\tBegin:{2:mm:ss,ffff}\tEnd:{3:mm:ss,ffff}\tTPool：{4}",
                     thread.ManagedThreadId,
@@ -198,5 +206,54 @@ namespace Senparc.Weixin.MP.CoreSample.Controllers
             return Content(result);
         }
 
+
+        /// <summary>
+        /// 多账号注册测试
+        /// </summary>
+        /// <returns></returns>
+        public async Task<ActionResult> MultiAccountTest()
+        {
+            //说明：这里的多账号通过 appsettings.json 直接注入，如果您在自己的服务上进行测试，请使用自己对应的 appId、secret 等信息
+
+            //对本接口调用设置限制（如果此站点部署至公网，务必对刷新AccessToken接口做限制！
+            var cache = CacheStrategyFactory.GetObjectCacheStrategyInstance();
+            var cacheKey = "LastMultiAccountTestTime";
+            if (!Request.IsLocal() && await cache.CheckExistedAsync(cacheKey))
+            {
+                var lastMultiAccountTest = await cache.GetAsync<DateTimeOffset>("LastMultiAccountTestTime");
+                if ((SystemTime.Now - lastMultiAccountTest).TotalSeconds < 30)
+                {
+                    return Content("访问频次过快，请稍后再试！");
+                }
+            }
+            //储存当前访问时间，用于限制刷新频次
+            await cache.SetAsync(cacheKey, SystemTime.Now);
+
+            //演示通过 key 来获取 SenparcWeixinSetting 储存信息，如果有明确的WeixinAppId，这一步也可以省略
+            var setting1 = Weixin.Config.SenparcWeixinSetting.Items["Default"];
+            var setting2 = Weixin.Config.SenparcWeixinSetting.Items["第二个公众号"];
+
+            var sb = new StringBuilder();
+
+            //获取一轮AccessToken
+            var token1_1 = await MP.Containers.AccessTokenContainer.GetAccessTokenResultAsync(setting1.WeixinAppId, true);
+            var token2_1 = await MP.Containers.AccessTokenContainer.GetAccessTokenResultAsync(setting2.WeixinAppId, true);
+            sb.Append($"AccessToken 1-1:{token1_1.access_token.Substring(1, 20)}...<br>");
+            sb.Append($"AccessToken 2-1:{token2_1.access_token.Substring(1, 20)}...<br><br>");
+
+            //重新获取一轮
+            var token1_2 = await MP.Containers.AccessTokenContainer.GetAccessTokenResultAsync(setting1.WeixinAppId, true);
+            var token2_2 = await MP.Containers.AccessTokenContainer.GetAccessTokenResultAsync(setting2.WeixinAppId, true);
+            sb.Append($"AccessToken 1-1:{token1_2.access_token.Substring(1, 20)}...<br>");
+            sb.Append($"AccessToken 2-1:{token2_2.access_token.Substring(1, 20)}...<br><br>");
+
+            //使用高级接口返回消息
+            var result1 = await MP.AdvancedAPIs.UrlApi.ShortUrlAsync(setting1.WeixinAppId, "long2short", "https://sdk.weixin.senparc.com");
+            var result2 = await MP.AdvancedAPIs.UrlApi.ShortUrlAsync(setting2.WeixinAppId, "long2short", "https://weixin.senparc.com");
+            sb.Append($"Result 1:{result1.short_url}<br>");
+            sb.Append($"Result 2:{result2.short_url}<br><br>");
+
+            return Content(sb.ToString(), "text/html", Encoding.UTF8);
+        }
     }
 }

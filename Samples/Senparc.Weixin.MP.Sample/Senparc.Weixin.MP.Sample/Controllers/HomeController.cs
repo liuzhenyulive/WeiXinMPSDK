@@ -43,8 +43,10 @@ namespace Senparc.Weixin.MP.Sample.Controllers
                 var version = System.Reflection.Assembly.GetAssembly(type).GetName().Version;
                 return getDisplayVersion(version);
             };
+            TempData["SampleVersion"] = getTypeVersionInfo(this.GetType());//当前Demo的版本号
+            TempData["CO2NETVersion"] = getTypeVersionInfo(typeof(CO2NET.Config));//CO2NET版本号
+            TempData["NeuCharVersion"] = getTypeVersionInfo(typeof(Senparc.NeuChar.ApiBindInfo));//NeuChar版本号
 
-            TempData["CO2NETVersion"] = getTypeVersionInfo(typeof(CO2NET.Config));
             TempData["WeixinVersion"] = getTypeVersionInfo(typeof(Senparc.Weixin.Config));
             TempData["TenPayVersion"] = getTypeVersionInfo(typeof(Senparc.Weixin.TenPay.Register));//DPBMARK TenPay DPBMARK_END
             TempData["MpVersion"] = getTypeVersionInfo(typeof(Senparc.Weixin.MP.Register));//DPBMARK MP DPBMARK_END
@@ -59,20 +61,24 @@ namespace Senparc.Weixin.MP.Sample.Controllers
 
             //缓存
             //var containerCacheStrategy  = CacheStrategyFactory.GetContainerCacheStrategyInstance();
-            var containerCacheStrategy = ContainerCacheStrategyFactory.GetContainerCacheStrategyInstance();
+            var containerCacheStrategy = ContainerCacheStrategyFactory.GetContainerCacheStrategyInstance()/*.ContainerCacheStrategy*/;
             TempData["CacheStrategy"] = containerCacheStrategy.GetType().Name.Replace("ContainerCacheStrategy", "");
 
             //文档下载版本
-            var configHelper = new ConfigHelper(this.HttpContext);
+            var configHelper = new ConfigHelper();
             var config = configHelper.GetConfig();
             TempData["NewestDocumentVersion"] = config.Versions.First();
 
             Weixin.WeixinTrace.SendCustomLog("首页被访问", string.Format("Url：{0}\r\nIP：{1}", Request.Url, Request.UserHostName));
 
+            //获取编译时间
+            TempData["BuildTime"] = System.IO.File.GetLastWriteTime(this.GetType().Assembly.Location).ToString("yyyyMMdd.HH.mm");
+
             return View();
         }
 
-        public ActionResult WeChatSampleBuilder() {
+        public ActionResult WeChatSampleBuilder()
+        {
             return View();
         }
 
@@ -123,6 +129,29 @@ namespace Senparc.Weixin.MP.Sample.Controllers
             }
             var accessTokenBags = AccessTokenContainer.GetAllItems();
             return Json(accessTokenBags, JsonRequestBehavior.AllowGet);
+        }
+
+        /// <summary>
+        /// 测试未经注册的TryGetAccessToken同步方法
+        /// </summary>
+        /// <returns></returns>
+        public ActionResult TryGetAccessTokenTest()
+        {
+            Stopwatch sp = new Stopwatch();
+            var appId = "YourAppId";//非config里的注册过的appid
+            var appSecret = "YourSecret";//非config里的注册过的appSecret
+            sp.Start();
+            string message = string.Empty;
+            try
+            {
+                 message = AccessTokenContainer.TryGetAccessToken(appId, appSecret, true);//
+            }
+            catch (Exception e)
+            {
+                message = e.Message;
+            }
+            sp.Stop();
+            return Content($"消息：{message.Substring(0, 10)}...\r\n耗时 {sp.ElapsedMilliseconds}ms");
         }
     }
 }
